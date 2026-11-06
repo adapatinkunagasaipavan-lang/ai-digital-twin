@@ -1,0 +1,7 @@
+streamlit>=1.40
+anthropic>=0.40
+edge-tts>=6.1.12
+SpeechRecognition>=3.10.4
+audioop-lts; python_version >= "3.13"
+PyYAML>=6.0
+requests>=2.31

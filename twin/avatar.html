@@ -1,0 +1,227 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: transparent; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+  .wrap { position: relative; width: 100%; max-width: 440px; margin: 0 auto; }
+  canvas { width: 100%; display: block; border-radius: 22px; background: #14161c;
+           box-shadow: 0 12px 40px rgba(0,0,0,.35); }
+  .badge { position: absolute; left: 14px; top: 14px; padding: 5px 12px; border-radius: 999px;
+           background: rgba(10,12,18,.62); color: #e9ecf3; font-size: 12px; backdrop-filter: blur(6px); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #8a8f9c; margin-right: 6px; }
+  .live .dot { background: #3ddc84; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  #play { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); display: none;
+          border: 0; border-radius: 999px; padding: 10px 20px; font-size: 14px; cursor: pointer;
+          background: #ff4b4b; color: #fff; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="cv"></canvas>
+  <div class="badge" id="badge"><span class="dot"></span><span id="status">Idle</span></div>
+  <button id="play">&#9654; Play answer</button>
+</div>
+
+<script>
+const CFG = __CONFIG__;
+const L = CFG.landmarks;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const badge = document.getElementById('badge');
+const statusEl = document.getElementById('status');
+const playBtn = document.getElementById('play');
+
+let W, H, img = new Image();
+let off, offCtx, tmp, tmpCtx, skin = '#c99a7a', shade = '#b0826a';
+let speaking = false, mouth = 0, pulse = 0;
+let analyser = null, buf = null, audio = null, audioCtx = null;
+let nextBlink = 1500, blinkStart = -1;
+
+img.onload = start;
+img.src = CFG.photo;
+
+function setStatus(s, live) {
+  statusEl.textContent = s;
+  badge.classList.toggle('live', !!live);
+}
+
+function start() {
+  W = img.naturalWidth; H = img.naturalHeight;
+  cv.width = W; cv.height = H;
+  off = document.createElement('canvas'); off.width = W; off.height = H;
+  offCtx = off.getContext('2d', { willReadFrequently: true }); offCtx.drawImage(img, 0, 0);
+  tmp = document.createElement('canvas'); tmpCtx = tmp.getContext('2d');
+  skin = sampleSkin();
+  if (CFG.audio) setupAudio();
+  else if (CFG.text) setupBrowserTTS();
+  requestAnimationFrame(frame);
+}
+
+// average colour of the cheeks, used for eyelids
+function sampleSkin() {
+  let r = 0, g = 0, b = 0, n = 0;
+  for (const [fx, fy] of [[L.eyeL[0], L.eyeL[1] + 0.04], [L.eyeR[0], L.eyeR[1] + 0.04], [L.eyeL[0], L.eyeL[1] - 0.03], [L.eyeR[0], L.eyeR[1] - 0.03]]) {
+    const d = offCtx.getImageData(Math.round(fx * W) - 6, Math.round(fy * H) - 6, 12, 12).data;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+  }
+  r /= n; g /= n; b /= n;
+  shade = `rgb(${Math.round(r * 0.95)},${Math.round(g * 0.93)},${Math.round(b * 0.91)})`;
+  return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+}
+
+// ------------------------------------------------------------ audio / lip-sync
+function b64ToBlobUrl(b64, mime) {
+  const bin = atob(b64), arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return URL.createObjectURL(new Blob([arr], { type: mime }));
+}
+
+function setupAudio() {
+  audio = new Audio(b64ToBlobUrl(CFG.audio, 'audio/mpeg'));
+  const AC = window.AudioContext || window.webkitAudioContext;
+  audioCtx = new AC();
+  const srcNode = audioCtx.createMediaElementSource(audio);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 512;
+  buf = new Uint8Array(analyser.fftSize);
+  srcNode.connect(analyser);
+  analyser.connect(audioCtx.destination);
+  audio.onplay = () => { speaking = true; setStatus('Speaking', true); playBtn.style.display = 'none'; };
+  audio.onended = () => { speaking = false; setStatus('Idle', false); playBtn.textContent = '↻ Replay'; playBtn.style.display = 'block'; };
+  tryPlay();
+}
+
+function tryPlay() {
+  audioCtx.resume().catch(() => {});
+  audio.play().catch(() => { playBtn.textContent = '▶ Play answer'; playBtn.style.display = 'block'; });
+}
+playBtn.onclick = () => { audio.currentTime = 0; tryPlay(); };
+
+function setupBrowserTTS() {
+  if (!('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(CFG.text);
+  u.lang = CFG.lang; u.rate = 1.0;
+  u.onstart = () => { speaking = true; setStatus('Speaking', true); };
+  u.onboundary = () => { pulse = 1; };
+  u.onend = u.onerror = () => { speaking = false; setStatus('Idle', false); };
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(u);
+}
+
+function targetMouth(t) {
+  if (!speaking) return 0;
+  if (analyser) {
+    analyser.getByteTimeDomainData(buf);
+    let s = 0;
+    for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; s += v * v; }
+    const rms = Math.sqrt(s / buf.length);
+    return Math.min(1, rms * 8);
+  }
+  // browser TTS: no audio access, so fake it with a speech-like rhythm
+  pulse *= 0.93;
+  return Math.min(1, 0.22 + 0.45 * Math.abs(Math.sin(t / 95)) * (0.6 + Math.random() * 0.4) + pulse * 0.25);
+}
+
+// ------------------------------------------------------------ drawing
+function drawEyes(b) {
+  if (b < 0.03) return;
+  const rx = L.eyeRx * W, ry = L.eyeRy * H;
+  for (const [fx, fy] of [L.eyeL, L.eyeR]) {
+    const ex = fx * W, ey = fy * H;
+    ctx.save();
+    ctx.beginPath(); ctx.ellipse(ex, ey, rx * 1.08, ry * 1.45, L.eyeTilt, 0, Math.PI * 2); ctx.clip();
+    ctx.translate(ex, ey); ctx.rotate(L.eyeTilt);
+    const top = -ry * 1.5, drop = ry * 3.0 * b;
+    const lg = ctx.createLinearGradient(0, top, 0, top + drop);
+    lg.addColorStop(0, skin); lg.addColorStop(1, shade);
+    ctx.fillStyle = lg; ctx.fillRect(-rx * 1.2, top, rx * 2.4, drop);
+    ctx.strokeStyle = 'rgba(25,12,8,.75)'; ctx.lineWidth = Math.max(2, W * 0.003);
+    ctx.beginPath(); ctx.moveTo(-rx, top + drop); ctx.lineTo(rx, top + drop); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawMouth(m) {
+  if (m < 0.04) return;
+  const mx = L.mouth[0] * W, my = L.mouth[1] * H;
+  const mw = L.mouthW * W;
+  const d = m * H * 0.020;                       // how far the jaw drops (px)
+  const xL = L.jawL * W, xR = L.jawR * W, yB = L.chin * H;
+  const rw = xR - xL, rh = yB - my;
+
+  // jaw: stretch the lower face downwards (continuous at the lip line, so no seam),
+  // feathered at the sides and bottom so it blends into the cheeks and neck
+  tmp.width = rw; tmp.height = rh + d;
+  tmpCtx.clearRect(0, 0, rw, rh + d);
+  tmpCtx.globalCompositeOperation = 'source-over';
+  tmpCtx.drawImage(off, xL, my, rw, rh, 0, 0, rw, rh + d);
+  tmpCtx.globalCompositeOperation = 'destination-in';
+  const gx = tmpCtx.createLinearGradient(0, 0, rw, 0);
+  gx.addColorStop(0, 'rgba(0,0,0,0)'); gx.addColorStop(0.16, 'rgba(0,0,0,1)');
+  gx.addColorStop(0.84, 'rgba(0,0,0,1)'); gx.addColorStop(1, 'rgba(0,0,0,0)');
+  tmpCtx.fillStyle = gx; tmpCtx.fillRect(0, 0, rw, rh + d);
+  const gy = tmpCtx.createLinearGradient(0, 0, 0, rh + d);
+  gy.addColorStop(0, 'rgba(0,0,0,1)'); gy.addColorStop(0.8, 'rgba(0,0,0,1)'); gy.addColorStop(1, 'rgba(0,0,0,0)');
+  tmpCtx.fillStyle = gy; tmpCtx.fillRect(0, 0, rw, rh + d);
+  tmpCtx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(tmp, xL, my);
+
+  // mouth opening, sits between the (fixed) upper lip and the dropped lower lip
+  const cw = mw * (0.30 - 0.05 * (1 - m)), ch = d * 0.5 + 1.2;
+  const cy = my + d * 0.30;
+  ctx.save();
+  ctx.beginPath(); ctx.ellipse(mx, cy, cw, ch, 0, 0, Math.PI * 2); ctx.clip();
+  const g = ctx.createLinearGradient(0, cy - ch, 0, cy + ch);
+  g.addColorStop(0, '#2b0e11'); g.addColorStop(1, '#4d171c');
+  ctx.fillStyle = g; ctx.fillRect(mx - cw, cy - ch, cw * 2, ch * 2);
+  if (m > 0.35) {                                // hint of upper teeth
+    ctx.fillStyle = 'rgba(240,235,226,.92)';
+    ctx.fillRect(mx - cw * 0.7, cy - ch, cw * 1.4, ch * 0.42);
+  }
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(120,55,55,.55)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.ellipse(mx, cy, cw, ch, 0, 0, Math.PI * 2); ctx.stroke();
+}
+
+function debugOverlay() {
+  ctx.save(); ctx.lineWidth = 2; ctx.strokeStyle = '#00e5ff'; ctx.fillStyle = '#00e5ff';
+  const dot = (x, y) => { ctx.beginPath(); ctx.arc(x * W, y * H, 5, 0, 7); ctx.fill(); };
+  dot(L.mouth[0], L.mouth[1]); dot(L.eyeL[0], L.eyeL[1]); dot(L.eyeR[0], L.eyeR[1]); dot(L.neck[0], L.neck[1]);
+  ctx.strokeRect(L.jawL * W, L.mouth[1] * H, (L.jawR - L.jawL) * W, (L.chin - L.mouth[1]) * H);
+  ctx.beginPath(); ctx.moveTo((L.mouth[0] - L.mouthW / 2) * W, L.mouth[1] * H);
+  ctx.lineTo((L.mouth[0] + L.mouthW / 2) * W, L.mouth[1] * H); ctx.stroke();
+  ctx.restore();
+}
+
+function frame(t) {
+  // smooth mouth, schedule blinks
+  mouth += (targetMouth(t) - mouth) * 0.55;
+  if (blinkStart < 0 && t > nextBlink) blinkStart = t;
+  let b = 0;
+  if (blinkStart >= 0) {
+    const p = (t - blinkStart) / 170;
+    if (p >= 1) { blinkStart = -1; nextBlink = t + 2200 + Math.random() * 3200; }
+    else b = Math.sin(p * Math.PI);
+  }
+
+  const talk = speaking ? 1 : 0;
+  const ang = Math.sin(t / 1900) * 0.005 + talk * Math.sin(t / 310) * 0.006;
+  const dx = Math.sin(t / 2300) * W * 0.003 + talk * Math.sin(t / 420) * W * 0.002;
+  const dy = Math.sin(t / 1500) * H * 0.002 + talk * Math.abs(Math.sin(t / 360)) * H * 0.0015;
+  const nx = L.neck[0] * W, ny = L.neck[1] * H;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(nx + dx, ny + dy); ctx.rotate(ang); ctx.scale(1.03, 1.03); ctx.translate(-nx, -ny);
+  ctx.drawImage(img, 0, 0);
+  drawEyes(b);
+  drawMouth(mouth);
+  if (CFG.debug) debugOverlay();
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>
