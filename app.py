@@ -58,7 +58,7 @@ with st.sidebar:
 
     mode = st.radio(
         "Avatar mode",
-        ["2D animated photo (free)", "Realistic video (D-ID)"],
+        ["3D animated photo (free)", "Realistic video (D-ID)"],
         help="The realistic mode needs a D-ID API key and uses credits.",
     )
 
@@ -68,7 +68,6 @@ with st.sidebar:
         k_anthropic = st.text_input("Anthropic API key", type="password") or secret("ANTHROPIC_API_KEY")
         k_did = st.text_input("D-ID API key", type="password") or secret("DID_API_KEY")
 
-    debug = st.checkbox("Calibrate face points", help="Shows eye/mouth markers on the photo.")
     if st.button("🗑️ Clear conversation"):
         ss.messages, ss.play, ss.video_url = [], None, None
         st.rerun()
@@ -96,7 +95,7 @@ def answer(prompt: str) -> None:
     ss.play, ss.video_url = {"text": text, "audio": None}, None
     if mode.startswith("Realistic"):
         if not k_did:
-            st.toast("Add a D-ID API key in the sidebar for realistic mode. Using 2D avatar.", icon="⚠️")
+            st.toast("Add a D-ID API key in the sidebar for realistic mode. Using the 3D photo avatar.", icon="⚠️")
         else:
             try:
                 with st.spinner("Rendering video…"):
@@ -106,7 +105,7 @@ def answer(prompt: str) -> None:
                 ss.play = None
                 return
             except Exception as exc:
-                st.toast(f"D-ID failed ({exc}). Using 2D avatar.", icon="⚠️")
+                st.toast(f"D-ID failed ({exc}). Using the 3D photo avatar.", icon="⚠️")
     if voice_on:
         ss.play["audio"] = voice.tts_mp3(text, lang)
 
@@ -155,7 +154,6 @@ with avatar_col:
             text=(play or {}).get("text") if (play and voice_on) else None,
             lang=lang,
             landmarks=landmarks,
-            debug=debug,
         )
         components.html(html, height=540)
     st.caption("🤖 This is an AI twin built by me. Answers come only from my profile.")

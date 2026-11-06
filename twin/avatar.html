@@ -26,73 +26,60 @@
 
 <script>
 const CFG = __CONFIG__;
-const L = CFG.landmarks;
-const cv = document.getElementById('cv');
-const ctx = cv.getContext('2d');
+const L = CFG.landmarks;                 // only used by the 2D fallback
+const MESH = CFG.mesh;                   // 3D face mesh (built by tools/build_face_mesh.py)
+let cv = document.getElementById('cv');
 const badge = document.getElementById('badge');
 const statusEl = document.getElementById('status');
 const playBtn = document.getElementById('play');
 
 let W, H, img = new Image();
-let off, offCtx, tmp, tmpCtx, skin = '#c99a7a', shade = '#b0826a';
-let speaking = false, mouth = 0, pulse = 0;
-let analyser = null, buf = null, audio = null, audioCtx = null;
+let speaking = false, pulse = 0;
+let analyser = null, buf = null, fbuf = null, audio = null, audioCtx = null;
 let nextBlink = 1500, blinkStart = -1;
+// smoothed viseme state
+let vOpen = 0, vRound = 0, vWide = 0;
+let render = null;                        // set to the active renderer
+
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 
 img.onload = start;
 img.src = CFG.photo;
 
-function setStatus(s, live) {
-  statusEl.textContent = s;
-  badge.classList.toggle('live', !!live);
-}
+function setStatus(s, live) { statusEl.textContent = s; badge.classList.toggle('live', !!live); }
 
 function start() {
   W = img.naturalWidth; H = img.naturalHeight;
   cv.width = W; cv.height = H;
-  off = document.createElement('canvas'); off.width = W; off.height = H;
-  offCtx = off.getContext('2d', { willReadFrequently: true }); offCtx.drawImage(img, 0, 0);
-  tmp = document.createElement('canvas'); tmpCtx = tmp.getContext('2d');
-  skin = sampleSkin();
-  if (CFG.audio) setupAudio();
-  else if (CFG.text) setupBrowserTTS();
+  let ok = false;
+  if (MESH) { try { ok = init3D(); } catch (e) { console.warn('3D init failed, using 2D', e); } }
+  if (!ok) {                                  // fresh canvas: a failed WebGL canvas can't give a 2D context
+    const n = cv.cloneNode(false); cv.parentNode.replaceChild(n, cv); cv = n; cv.width = W; cv.height = H;
+    init2D();
+  }
+  if (CFG.audio) setupAudio(); else if (CFG.text) setupBrowserTTS();
   requestAnimationFrame(frame);
 }
 
-// average colour of the cheeks, used for eyelids
-function sampleSkin() {
-  let r = 0, g = 0, b = 0, n = 0;
-  for (const [fx, fy] of [[L.eyeL[0], L.eyeL[1] + 0.04], [L.eyeR[0], L.eyeR[1] + 0.04], [L.eyeL[0], L.eyeL[1] - 0.03], [L.eyeR[0], L.eyeR[1] - 0.03]]) {
-    const d = offCtx.getImageData(Math.round(fx * W) - 6, Math.round(fy * H) - 6, 12, 12).data;
-    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
-  }
-  r /= n; g /= n; b /= n;
-  shade = `rgb(${Math.round(r * 0.95)},${Math.round(g * 0.93)},${Math.round(b * 0.91)})`;
-  return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
-}
-
-// ------------------------------------------------------------ audio / lip-sync
+// =================================================================== audio
 function b64ToBlobUrl(b64, mime) {
   const bin = atob(b64), arr = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return URL.createObjectURL(new Blob([arr], { type: mime }));
 }
-
 function setupAudio() {
   audio = new Audio(b64ToBlobUrl(CFG.audio, 'audio/mpeg'));
   const AC = window.AudioContext || window.webkitAudioContext;
   audioCtx = new AC();
   const srcNode = audioCtx.createMediaElementSource(audio);
   analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 512;
-  buf = new Uint8Array(analyser.fftSize);
-  srcNode.connect(analyser);
-  analyser.connect(audioCtx.destination);
+  analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.25;
+  buf = new Uint8Array(analyser.fftSize); fbuf = new Uint8Array(analyser.frequencyBinCount);
+  srcNode.connect(analyser); analyser.connect(audioCtx.destination);
   audio.onplay = () => { speaking = true; setStatus('Speaking', true); playBtn.style.display = 'none'; };
   audio.onended = () => { speaking = false; setStatus('Idle', false); playBtn.textContent = '↻ Replay'; playBtn.style.display = 'block'; };
   tryPlay();
 }
-
 function tryPlay() {
   audioCtx.resume().catch(() => {});
   audio.play().catch(() => { playBtn.textContent = '▶ Play answer'; playBtn.style.display = 'block'; });
@@ -110,117 +97,282 @@ function setupBrowserTTS() {
   window.speechSynthesis.speak(u);
 }
 
-function targetMouth(t) {
-  if (!speaking) return 0;
-  if (analyser) {
-    analyser.getByteTimeDomainData(buf);
-    let s = 0;
-    for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; s += v * v; }
-    const rms = Math.sqrt(s / buf.length);
-    return Math.min(1, rms * 8);
+// Turn the audio into mouth shapes:
+//   open  = how loud (jaw drop)
+//   wide  = lots of high-frequency energy (ee, i)  -> lips stretch
+//   round = mostly low-frequency energy (oo, o)    -> lips purse
+function updateVisemes(t) {
+  let tOpen = 0, tRound = 0, tWide = 0;
+  if (speaking) {
+    if (analyser) {
+      analyser.getByteTimeDomainData(buf);
+      let s = 0;
+      for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; s += v * v; }
+      const rms = Math.sqrt(s / buf.length);
+      tOpen = rms < 0.012 ? 0 : Math.min(1, rms * 8);
+      analyser.getByteFrequencyData(fbuf);
+      const hz = audioCtx.sampleRate / analyser.fftSize;
+      const band = (a, b) => {
+        let sum = 0, n = 0;
+        for (let i = Math.floor(a / hz); i <= Math.min(fbuf.length - 1, Math.floor(b / hz)); i++) { sum += fbuf[i]; n++; }
+        return n ? sum / n : 0;
+      };
+      const rr = (band(1800, 4500) + 1) / (band(200, 800) + 1);
+      tWide = clamp((rr - 0.55) * 2.5, 0, 1) * tOpen;
+      tRound = clamp((0.4 - rr) * 2.5, 0, 0.6) * tOpen;
+    } else {                                   // browser voice: no audio access, fake a speech rhythm
+      pulse *= 0.93;
+      tOpen = Math.min(1, 0.22 + 0.45 * Math.abs(Math.sin(t / 95)) * (0.6 + Math.random() * 0.4) + pulse * 0.25);
+    }
   }
-  // browser TTS: no audio access, so fake it with a speech-like rhythm
-  pulse *= 0.93;
-  return Math.min(1, 0.22 + 0.45 * Math.abs(Math.sin(t / 95)) * (0.6 + Math.random() * 0.4) + pulse * 0.25);
+  vOpen += (tOpen - vOpen) * (tOpen > vOpen ? 0.6 : 0.3);
+  vWide += (tWide - vWide) * 0.35;
+  vRound += (tRound - vRound) * 0.35;
+}
+function blinkAmount(t) {
+  if (window.__forceBlink !== undefined) return window.__forceBlink;   // test hook
+  if (blinkStart < 0 && t > nextBlink) blinkStart = t;
+  if (blinkStart < 0) return 0;
+  const p = (t - blinkStart) / 170;
+  if (p >= 1) { blinkStart = -1; nextBlink = t + 2200 + Math.random() * 3200; return 0; }
+  return Math.sin(p * Math.PI);
+}
+function frame(t) {
+  updateVisemes(t);
+  render(t, blinkAmount(t));
+  requestAnimationFrame(frame);
 }
 
-// ------------------------------------------------------------ drawing
-function drawEyes(b) {
-  if (b < 0.03) return;
-  const rx = L.eyeRx * W, ry = L.eyeRy * H;
-  for (const [fx, fy] of [L.eyeL, L.eyeR]) {
-    const ex = fx * W, ey = fy * H;
+// =================================================================== 3D (WebGL)
+function init3D() {
+  const gl = cv.getContext('webgl', { alpha: true, antialias: true, premultipliedAlpha: false });
+  if (!gl) return false;
+  const N = MESH.n;
+  const rest = new Float32Array(MESH.pos), cur = new Float32Array(rest);
+  const nrm = new Float32Array(MESH.nrm);
+  const uv = new Float32Array(N * 2);
+  for (let i = 0; i < N; i++) { uv[2 * i] = rest[3 * i] / W; uv[2 * i + 1] = rest[3 * i + 1] / H; }
+  const wHead = new Float32Array(MESH.wHead), wJaw = new Float32Array(MESH.wJaw), wMouth = new Float32Array(MESH.wMouth);
+  const wBA = new Float32Array(MESH.wBlinkA), wBB = new Float32Array(MESH.wBlinkB);
+  const [mx, my] = MESH.mouth, [px, py, pz] = MESH.pivot;
+  const jawDrop = 0.27 * (MESH.chin - my);
+
+  function sh(type, src) {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  function prog(vs, fs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    return p;
+  }
+  const clip = 'gl_Position = vec4((aPos.x - uHalf.x) / uHalf.x, -(aPos.y - uHalf.y) / uHalf.y, -aPos.z / 1000.0, 1.0);';
+  const pFace = prog(
+    `attribute vec3 aPos; attribute vec2 aUv; attribute vec3 aNrm; attribute float aWH;
+     uniform vec2 uHalf; uniform mat3 uRot; varying vec2 vUv; varying float vShade;
+     void main() {
+       ${clip}
+       vUv = aUv;
+       vec3 L = normalize(vec3(-0.35, -0.45, 0.8));
+       vec3 n2 = normalize(mix(aNrm, uRot * aNrm, aWH));
+       vShade = 1.0 + 0.38 * (dot(n2, L) - dot(aNrm, L));
+     }`,
+    `precision mediump float; uniform sampler2D uTex; varying vec2 vUv; varying float vShade;
+     void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb * vShade, 1.0); }`);
+  const pFlat = prog(
+    `attribute vec3 aPos; uniform vec2 uHalf; void main() { ${clip} }`,
+    `precision mediump float; uniform vec4 uColor; void main() { gl_FragColor = uColor; }`);
+
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  const mk = (data, target = gl.ARRAY_BUFFER, usage = gl.STATIC_DRAW) => {
+    const b = gl.createBuffer(); gl.bindBuffer(target, b); gl.bufferData(target, data, usage); return b;
+  };
+  const bPos = mk(cur, gl.ARRAY_BUFFER, gl.DYNAMIC_DRAW), bUv = mk(uv), bNrm = mk(nrm), bWH = mk(wHead);
+  const bIdx = mk(new Uint16Array(MESH.idx), gl.ELEMENT_ARRAY_BUFFER);
+  const nIdx = MESH.idx.length;
+
+  // mouth interior: dark cavity + upper teeth, both follow the inner-lip contour
+  const up = MESH.innerUp;                                           // left corner -> right corner (11)
+  const lo = [up[0], ...MESH.innerLo.slice().reverse(), up[up.length - 1]];   // same order, lower lip (11)
+  const ring = [...up, ...MESH.innerLo];
+  const cavPos = new Float32Array((ring.length + 1) * 3);
+  const cavIdx = []; for (let i = 0; i < ring.length; i++) cavIdx.push(ring.length, i, (i + 1) % ring.length);
+  const bCav = mk(cavPos, gl.ARRAY_BUFFER, gl.DYNAMIC_DRAW), bCavI = mk(new Uint16Array(cavIdx), gl.ELEMENT_ARRAY_BUFFER);
+  const teethPos = new Float32Array(up.length * 2 * 3);
+  const teethIdx = [];
+  for (let j = 0; j < up.length - 1; j++) { const a = j, b = j + 1, c = up.length + j + 1, d = up.length + j; teethIdx.push(a, b, c, a, c, d); }
+  const bTeeth = mk(teethPos, gl.ARRAY_BUFFER, gl.DYNAMIC_DRAW), bTeethI = mk(new Uint16Array(teethIdx), gl.ELEMENT_ARRAY_BUFFER);
+
+  const loc = (p, n) => gl.getAttribLocation(p, n);
+  const rot = new Float32Array(9);
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS);
+  gl.viewport(0, 0, W, H);
+
+  render = function (t, blink) {
+    const talk = speaking ? 1 : 0;
+    // ---- head pose (radians): idle sway + a little nodding while talking
+    const yaw = Math.sin(t / 2100) * 0.075 + talk * Math.sin(t / 700) * 0.03;
+    const pitch = Math.sin(t / 1500) * 0.03 + talk * (0.02 * Math.sin(t / 330) * vOpen - 0.01);
+    const roll = Math.sin(t / 2600) * 0.018;
+    const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch), cr = Math.cos(roll), sr = Math.sin(roll);
+    // R = Ry * Rx * Rz   (row-major here, uploaded column-major)
+    const r00 = cy * cr + sy * sp * sr, r01 = -cy * sr + sy * sp * cr, r02 = sy * cp;
+    const r10 = cp * sr, r11 = cp * cr, r12 = -sp;
+    const r20 = -sy * cr + cy * sp * sr, r21 = sy * sr + cy * sp * cr, r22 = cy * cp;
+    rot.set([r00, r10, r20, r01, r11, r21, r02, r12, r22]);
+
+    const sx = 1 - 0.30 * vRound + 0.12 * vWide;
+    const jaw = vOpen * jawDrop;
+    for (let i = 0; i < N; i++) {
+      let x = rest[3 * i], y = rest[3 * i + 1], z = rest[3 * i + 2];
+      y += jaw * wJaw[i];                                              // jaw / lower lip drop
+      x = mx + (x - mx) * (1 + (sx - 1) * wMouth[i]);                  // lips purse / stretch
+      z += 7 * vRound * wMouth[i];                                     // lips push forward
+      y += blink * (MESH.eyeHA * wBA[i] + MESH.eyeHB * wBB[i]);        // eyelids
+      const dx = x - px, dy = y - py, dz = z - pz;                     // head rotation (3D, so nose/ears parallax)
+      const h = wHead[i];
+      cur[3 * i] = x + h * (r00 * dx + r01 * dy + r02 * dz + px - x);
+      cur[3 * i + 1] = y + h * (r10 * dx + r11 * dy + r12 * dz + py - y);
+      cur[3 * i + 2] = z + h * (r20 * dx + r21 * dy + r22 * dz + pz - z);
+    }
+
+    // cavity + teeth positions from the deformed inner-lip vertices
+    let cx = 0, cyy = 0, cz = 0;
+    ring.forEach((v, k) => {
+      cavPos[3 * k] = cur[3 * v]; cavPos[3 * k + 1] = cur[3 * v + 1]; cavPos[3 * k + 2] = cur[3 * v + 2] - 6;
+      cx += cur[3 * v]; cyy += cur[3 * v + 1]; cz += cur[3 * v + 2] - 6;
+    });
+    const rl = ring.length; cavPos.set([cx / rl, cyy / rl, cz / rl], rl * 3);
+    for (let j = 0; j < up.length; j++) {
+      const u = up[j], l = lo[j];
+      for (let k = 0; k < 3; k++) {
+        const a = cur[3 * u + k], b = cur[3 * l + k];
+        teethPos[3 * j + k] = a + (k === 2 ? -4 : 0);
+        teethPos[3 * (up.length + j) + k] = a + 0.28 * (b - a) + (k === 2 ? -4 : 0);
+      }
+    }
+
+    gl.clearColor(0.08, 0.09, 0.11, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // mouth interior first (behind the face mesh, visible through the lip opening)
+    if (vOpen > 0.02) {
+      gl.useProgram(pFlat);
+      gl.uniform2f(gl.getUniformLocation(pFlat, 'uHalf'), W / 2, H / 2);
+      const aP = loc(pFlat, 'aPos'); gl.enableVertexAttribArray(aP);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bCav); gl.bufferSubData(gl.ARRAY_BUFFER, 0, cavPos);
+      gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 0, 0);
+      gl.uniform4f(gl.getUniformLocation(pFlat, 'uColor'), 0.17, 0.05, 0.07, 1);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bCavI); gl.drawElements(gl.TRIANGLES, cavIdx.length, gl.UNSIGNED_SHORT, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bTeeth); gl.bufferSubData(gl.ARRAY_BUFFER, 0, teethPos);
+      gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 0, 0);
+      gl.uniform4f(gl.getUniformLocation(pFlat, 'uColor'), 0.93, 0.91, 0.86, 1);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bTeethI); gl.drawElements(gl.TRIANGLES, teethIdx.length, gl.UNSIGNED_SHORT, 0);
+      gl.disableVertexAttribArray(aP);
+    }
+
+    gl.useProgram(pFace);
+    gl.uniform2f(gl.getUniformLocation(pFace, 'uHalf'), W / 2, H / 2);
+    gl.uniformMatrix3fv(gl.getUniformLocation(pFace, 'uRot'), false, rot);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(gl.getUniformLocation(pFace, 'uTex'), 0);
+    const bind = (b, name, size) => {
+      const a = loc(pFace, name); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.enableVertexAttribArray(a);
+      gl.vertexAttribPointer(a, size, gl.FLOAT, false, 0, 0); return a;
+    };
+    gl.bindBuffer(gl.ARRAY_BUFFER, bPos); gl.bufferSubData(gl.ARRAY_BUFFER, 0, cur);
+    const attrs = [bind(bPos, 'aPos', 3), bind(bUv, 'aUv', 2), bind(bNrm, 'aNrm', 3), bind(bWH, 'aWH', 1)];
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bIdx);
+    gl.drawElements(gl.TRIANGLES, nIdx, gl.UNSIGNED_SHORT, 0);
+    attrs.forEach(a => gl.disableVertexAttribArray(a));
+  };
+  return true;
+}
+
+// =================================================================== 2D fallback (no WebGL / no mesh)
+function init2D() {
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  const off = document.createElement('canvas'); off.width = W; off.height = H;
+  const offCtx = off.getContext('2d', { willReadFrequently: true }); offCtx.drawImage(img, 0, 0);
+  const tmp = document.createElement('canvas'), tmpCtx = tmp.getContext('2d');
+  let skin = '#c99a7a', shade = '#b0826a';
+  (function () {
+    let r = 0, g = 0, b = 0, n = 0;
+    for (const [fx, fy] of [[L.eyeL[0], L.eyeL[1] + 0.04], [L.eyeR[0], L.eyeR[1] + 0.04], [L.eyeL[0], L.eyeL[1] - 0.03], [L.eyeR[0], L.eyeR[1] - 0.03]]) {
+      const d = offCtx.getImageData(Math.round(fx * W) - 6, Math.round(fy * H) - 6, 12, 12).data;
+      for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+    }
+    r /= n; g /= n; b /= n;
+    shade = `rgb(${Math.round(r * 0.95)},${Math.round(g * 0.93)},${Math.round(b * 0.91)})`;
+    skin = `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+  })();
+
+  function drawEyes(b) {
+    if (b < 0.03) return;
+    const rx = L.eyeRx * W, ry = L.eyeRy * H;
+    for (const [fx, fy] of [L.eyeL, L.eyeR]) {
+      const ex = fx * W, ey = fy * H;
+      ctx.save();
+      ctx.beginPath(); ctx.ellipse(ex, ey, rx * 1.08, ry * 1.45, L.eyeTilt, 0, Math.PI * 2); ctx.clip();
+      ctx.translate(ex, ey); ctx.rotate(L.eyeTilt);
+      const top = -ry * 1.5, drop = ry * 3.0 * b;
+      const lg = ctx.createLinearGradient(0, top, 0, top + drop);
+      lg.addColorStop(0, skin); lg.addColorStop(1, shade);
+      ctx.fillStyle = lg; ctx.fillRect(-rx * 1.2, top, rx * 2.4, drop);
+      ctx.restore();
+    }
+  }
+  function drawMouth(m) {
+    if (m < 0.04) return;
+    const mx = L.mouth[0] * W, my = L.mouth[1] * H, mw = L.mouthW * W;
+    const d = m * H * 0.020;
+    const xL = L.jawL * W, xR = L.jawR * W, yB = L.chin * H;
+    const rw = xR - xL, rh = yB - my;
+    tmp.width = rw; tmp.height = rh + d;
+    tmpCtx.clearRect(0, 0, rw, rh + d);
+    tmpCtx.globalCompositeOperation = 'source-over';
+    tmpCtx.drawImage(off, xL, my, rw, rh, 0, 0, rw, rh + d);
+    tmpCtx.globalCompositeOperation = 'destination-in';
+    const gx = tmpCtx.createLinearGradient(0, 0, rw, 0);
+    gx.addColorStop(0, 'rgba(0,0,0,0)'); gx.addColorStop(0.16, 'rgba(0,0,0,1)');
+    gx.addColorStop(0.84, 'rgba(0,0,0,1)'); gx.addColorStop(1, 'rgba(0,0,0,0)');
+    tmpCtx.fillStyle = gx; tmpCtx.fillRect(0, 0, rw, rh + d);
+    const gy = tmpCtx.createLinearGradient(0, 0, 0, rh + d);
+    gy.addColorStop(0, 'rgba(0,0,0,1)'); gy.addColorStop(0.8, 'rgba(0,0,0,1)'); gy.addColorStop(1, 'rgba(0,0,0,0)');
+    tmpCtx.fillStyle = gy; tmpCtx.fillRect(0, 0, rw, rh + d);
+    tmpCtx.globalCompositeOperation = 'source-over';
+    ctx.drawImage(tmp, xL, my);
+    const cw = mw * (0.30 - 0.05 * (1 - m)), ch = d * 0.5 + 1.2, cy = my + d * 0.30;
     ctx.save();
-    ctx.beginPath(); ctx.ellipse(ex, ey, rx * 1.08, ry * 1.45, L.eyeTilt, 0, Math.PI * 2); ctx.clip();
-    ctx.translate(ex, ey); ctx.rotate(L.eyeTilt);
-    const top = -ry * 1.5, drop = ry * 3.0 * b;
-    const lg = ctx.createLinearGradient(0, top, 0, top + drop);
-    lg.addColorStop(0, skin); lg.addColorStop(1, shade);
-    ctx.fillStyle = lg; ctx.fillRect(-rx * 1.2, top, rx * 2.4, drop);
-    ctx.strokeStyle = 'rgba(25,12,8,.75)'; ctx.lineWidth = Math.max(2, W * 0.003);
-    ctx.beginPath(); ctx.moveTo(-rx, top + drop); ctx.lineTo(rx, top + drop); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(mx, cy, cw, ch, 0, 0, Math.PI * 2); ctx.clip();
+    const g = ctx.createLinearGradient(0, cy - ch, 0, cy + ch);
+    g.addColorStop(0, '#2b0e11'); g.addColorStop(1, '#4d171c');
+    ctx.fillStyle = g; ctx.fillRect(mx - cw, cy - ch, cw * 2, ch * 2);
+    if (m > 0.35) { ctx.fillStyle = 'rgba(240,235,226,.92)'; ctx.fillRect(mx - cw * 0.7, cy - ch, cw * 1.4, ch * 0.42); }
     ctx.restore();
   }
-}
-
-function drawMouth(m) {
-  if (m < 0.04) return;
-  const mx = L.mouth[0] * W, my = L.mouth[1] * H;
-  const mw = L.mouthW * W;
-  const d = m * H * 0.020;                       // how far the jaw drops (px)
-  const xL = L.jawL * W, xR = L.jawR * W, yB = L.chin * H;
-  const rw = xR - xL, rh = yB - my;
-
-  // jaw: stretch the lower face downwards (continuous at the lip line, so no seam),
-  // feathered at the sides and bottom so it blends into the cheeks and neck
-  tmp.width = rw; tmp.height = rh + d;
-  tmpCtx.clearRect(0, 0, rw, rh + d);
-  tmpCtx.globalCompositeOperation = 'source-over';
-  tmpCtx.drawImage(off, xL, my, rw, rh, 0, 0, rw, rh + d);
-  tmpCtx.globalCompositeOperation = 'destination-in';
-  const gx = tmpCtx.createLinearGradient(0, 0, rw, 0);
-  gx.addColorStop(0, 'rgba(0,0,0,0)'); gx.addColorStop(0.16, 'rgba(0,0,0,1)');
-  gx.addColorStop(0.84, 'rgba(0,0,0,1)'); gx.addColorStop(1, 'rgba(0,0,0,0)');
-  tmpCtx.fillStyle = gx; tmpCtx.fillRect(0, 0, rw, rh + d);
-  const gy = tmpCtx.createLinearGradient(0, 0, 0, rh + d);
-  gy.addColorStop(0, 'rgba(0,0,0,1)'); gy.addColorStop(0.8, 'rgba(0,0,0,1)'); gy.addColorStop(1, 'rgba(0,0,0,0)');
-  tmpCtx.fillStyle = gy; tmpCtx.fillRect(0, 0, rw, rh + d);
-  tmpCtx.globalCompositeOperation = 'source-over';
-  ctx.drawImage(tmp, xL, my);
-
-  // mouth opening, sits between the (fixed) upper lip and the dropped lower lip
-  const cw = mw * (0.30 - 0.05 * (1 - m)), ch = d * 0.5 + 1.2;
-  const cy = my + d * 0.30;
-  ctx.save();
-  ctx.beginPath(); ctx.ellipse(mx, cy, cw, ch, 0, 0, Math.PI * 2); ctx.clip();
-  const g = ctx.createLinearGradient(0, cy - ch, 0, cy + ch);
-  g.addColorStop(0, '#2b0e11'); g.addColorStop(1, '#4d171c');
-  ctx.fillStyle = g; ctx.fillRect(mx - cw, cy - ch, cw * 2, ch * 2);
-  if (m > 0.35) {                                // hint of upper teeth
-    ctx.fillStyle = 'rgba(240,235,226,.92)';
-    ctx.fillRect(mx - cw * 0.7, cy - ch, cw * 1.4, ch * 0.42);
-  }
-  ctx.restore();
-  ctx.strokeStyle = 'rgba(120,55,55,.55)'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.ellipse(mx, cy, cw, ch, 0, 0, Math.PI * 2); ctx.stroke();
-}
-
-function debugOverlay() {
-  ctx.save(); ctx.lineWidth = 2; ctx.strokeStyle = '#00e5ff'; ctx.fillStyle = '#00e5ff';
-  const dot = (x, y) => { ctx.beginPath(); ctx.arc(x * W, y * H, 5, 0, 7); ctx.fill(); };
-  dot(L.mouth[0], L.mouth[1]); dot(L.eyeL[0], L.eyeL[1]); dot(L.eyeR[0], L.eyeR[1]); dot(L.neck[0], L.neck[1]);
-  ctx.strokeRect(L.jawL * W, L.mouth[1] * H, (L.jawR - L.jawL) * W, (L.chin - L.mouth[1]) * H);
-  ctx.beginPath(); ctx.moveTo((L.mouth[0] - L.mouthW / 2) * W, L.mouth[1] * H);
-  ctx.lineTo((L.mouth[0] + L.mouthW / 2) * W, L.mouth[1] * H); ctx.stroke();
-  ctx.restore();
-}
-
-function frame(t) {
-  // smooth mouth, schedule blinks
-  mouth += (targetMouth(t) - mouth) * 0.55;
-  if (blinkStart < 0 && t > nextBlink) blinkStart = t;
-  let b = 0;
-  if (blinkStart >= 0) {
-    const p = (t - blinkStart) / 170;
-    if (p >= 1) { blinkStart = -1; nextBlink = t + 2200 + Math.random() * 3200; }
-    else b = Math.sin(p * Math.PI);
-  }
-
-  const talk = speaking ? 1 : 0;
-  const ang = Math.sin(t / 1900) * 0.005 + talk * Math.sin(t / 310) * 0.006;
-  const dx = Math.sin(t / 2300) * W * 0.003 + talk * Math.sin(t / 420) * W * 0.002;
-  const dy = Math.sin(t / 1500) * H * 0.002 + talk * Math.abs(Math.sin(t / 360)) * H * 0.0015;
-  const nx = L.neck[0] * W, ny = L.neck[1] * H;
-
-  ctx.clearRect(0, 0, W, H);
-  ctx.save();
-  ctx.translate(nx + dx, ny + dy); ctx.rotate(ang); ctx.scale(1.03, 1.03); ctx.translate(-nx, -ny);
-  ctx.drawImage(img, 0, 0);
-  drawEyes(b);
-  drawMouth(mouth);
-  if (CFG.debug) debugOverlay();
-  ctx.restore();
-  requestAnimationFrame(frame);
+  render = function (t, b) {
+    const talk = speaking ? 1 : 0;
+    const ang = Math.sin(t / 1900) * 0.005 + talk * Math.sin(t / 310) * 0.006;
+    const dx = Math.sin(t / 2300) * W * 0.003 + talk * Math.sin(t / 420) * W * 0.002;
+    const dy = Math.sin(t / 1500) * H * 0.002 + talk * Math.abs(Math.sin(t / 360)) * H * 0.0015;
+    const nx = L.neck[0] * W, ny = L.neck[1] * H;
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(nx + dx, ny + dy); ctx.rotate(ang); ctx.scale(1.03, 1.03); ctx.translate(-nx, -ny);
+    ctx.drawImage(img, 0, 0);
+    drawEyes(b); drawMouth(vOpen);
+    ctx.restore();
+  };
 }
 </script>
 </body>

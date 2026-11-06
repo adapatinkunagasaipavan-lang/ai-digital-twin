@@ -69,6 +69,7 @@ def test_avatar_html_embeds_config():
     html = build_html(ROOT / "assets" / "photo.jpg", audio_mp3=b"ID3abc", lang="te", debug=True)
     assert "__CONFIG__" not in html
     assert '"lang": "te-IN"' in html and '"debug": true' in html and "<canvas" in html
+    assert '"mesh": {' in html and "init3D" in html        # 3D face mesh is embedded
 
 
 def test_did_flow(monkeypatch):
@@ -107,3 +108,15 @@ def test_streamlit_app_flow(monkeypatch):
     roles = [m.avatar for m in at.chat_message]
     assert len(at.chat_message) == 2 and roles[1] == "🧑‍💻"
     assert "skills" in at.chat_message[1].markdown[0].value.lower()
+
+
+def test_face_mesh_is_consistent():
+    import json
+
+    m = json.loads((ROOT / "assets" / "face_mesh.json").read_text())
+    n = m["n"]
+    assert len(m["pos"]) == 3 * n and len(m["nrm"]) == 3 * n
+    for k in ("wHead", "wJaw", "wMouth", "wBlinkA", "wBlinkB"):
+        assert len(m[k]) == n
+    assert max(m["idx"]) < n and len(m["idx"]) % 3 == 0
+    assert all(0 <= w <= 1 for w in m["wJaw"])

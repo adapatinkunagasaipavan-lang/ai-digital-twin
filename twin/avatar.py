@@ -38,7 +38,10 @@ def build_html(
     text:      if given WITHOUT audio, the browser's built-in voice speaks it.
     """
     lm = {**DEFAULT_LANDMARKS, **(landmarks or {})}
+    mesh_file = Path(photo_path).with_name("face_mesh.json")
+    mesh = json.loads(mesh_file.read_text()) if mesh_file.exists() else None
     cfg = {
+        "mesh": mesh,
         "photo": _data_uri(photo_path, "image/jpeg"),
         "audio": base64.b64encode(audio_mp3).decode() if audio_mp3 else None,
         "text": text if (text and not audio_mp3) else None,

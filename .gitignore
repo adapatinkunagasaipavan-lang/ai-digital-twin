@@ -6,3 +6,5 @@ venv/
 .streamlit/secrets.toml
 .pytest_cache/
 .DS_Store
+.mpvenv/
+assets/face_mesh_debug.png

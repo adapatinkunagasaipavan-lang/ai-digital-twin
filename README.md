@@ -10,7 +10,7 @@ Built with Python + Streamlit. Works with or without paid keys.
 | Brain | Claude API, grounded on `profile.yaml` (never invents facts). Falls back to an offline matcher if no key / API down |
 | Voice out | `edge-tts` neural voices (English-India, Telugu), free, no key |
 | Voice in | `st.audio_input` + Google web speech, free, no key |
-| Avatar (free) | Canvas animation of my photo: lip-sync driven by real audio loudness, blinking, head sway |
+| Avatar (free) | My photo turned into a 3D face mesh (WebGL): head turns with real parallax, jaw/lips follow the audio (loudness + vowel-like shape), mouth interior with teeth, blinking, soft shading |
 | Avatar (realistic) | Optional D-ID API: photo + text -> talking video |
 | Languages | English and Telugu |
 
@@ -31,8 +31,13 @@ For full answers add a Claude key (below).
 
 1. Edit **`profile.yaml`**: name, summary, skills, projects, FAQ answers. Replace every `[placeholder]`.
 2. Replace **`assets/photo.jpg`** with your photo (front-facing, mouth closed, plain background, ~720x900).
-3. If the eyes or mouth look misplaced, tick **Calibrate face points** in the sidebar and adjust
-   `avatar_landmarks` in `profile.yaml` (fractions of photo width/height; defaults are in `twin/avatar.py`).
+3. Rebuild the 3D face mesh for the new photo (one-off, needs Python 3.11 because the 0.10.14 mediapipe wheel bundles the face model):
+   ```bash
+   python3.11 -m venv .mpvenv && source .mpvenv/bin/activate     # Windows: .mpvenv\Scripts\activate
+   pip install mediapipe==0.10.14 opencv-python-headless scipy numpy shapely
+   python tools/build_face_mesh.py --debug     # writes assets/face_mesh.json (+ a debug picture)
+   ```
+   Commit `assets/face_mesh.json`. Without it (or without WebGL) the app falls back to a simpler 2D animation.
 
 ## 🔑 API keys (optional)
 
@@ -70,7 +75,8 @@ Docker alternative: `docker build -t twin . && docker run -p 8501:8501 -e ANTHRO
 - `app.py` : Streamlit UI and flow
 - `twin/brain.py` : prompt building, Claude call, offline fallback
 - `twin/voice.py` : text-to-speech and speech-to-text
-- `twin/avatar.py` + `avatar.html` : the animated photo component
+- `twin/avatar.py` + `avatar.html` : the animated photo component (WebGL 3D mesh, 2D fallback)
+- `tools/build_face_mesh.py` : builds `assets/face_mesh.json` from the photo (landmarks, triangles, jaw/lip/eye weights)
 - `twin/did_client.py` : optional D-ID video mode
 
 ## ✅ Tests
@@ -83,6 +89,7 @@ pytest
 ## ⚠️ Notes
 
 - The twin states that it is an AI and only answers from `profile.yaml`.
+- The avatar is a 2.5D mesh from a single photo: it turns its head a few degrees and moves its mouth realistically, but it is not a full 3D model. For photoreal video use the D-ID mode.
 - Browsers may block autoplay audio until you click once; a **Play answer** button appears if so.
 - Voice input uses a free Google endpoint and may be rate-limited; typing always works.
 - The D-ID mode is implemented against the public API docs but needs your key to try.
