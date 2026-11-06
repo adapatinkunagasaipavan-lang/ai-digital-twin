@@ -22,7 +22,8 @@ PROFILE = {
 def test_profile_file_loads():
     p = load_profile(ROOT / "profile.yaml")
     assert p["name"]
-    assert has_placeholders(p)  # template ships with placeholders
+    assert p.get("experience") and p.get("education")
+    assert not has_placeholders(p)  # no "[...]" template text left
 
 
 def test_system_prompt_contains_profile_and_rules():

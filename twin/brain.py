@@ -125,7 +125,7 @@ def _chunks(profile: dict) -> list[tuple[str, str, str]]:
                     f"{' '.join(map(str, pr.get('tech', []) or []))}", "",
                     f"{pr.get('name')}: {_clean(pr.get('description', ''))}"))
     for e in profile.get("experience", []) or []:
-        hl = " ".join(map(str, e.get("highlights", []) or []))
+        hl = " ".join(map(str, (e.get("highlights", []) or [])[:2]))   # keep the spoken answer short
         out.append(("experience work job internship company career role", "",
                     f"I worked as {e.get('role')} at {e.get('company')} "
                     f"({e.get('period')}). {_clean(hl)}"))
