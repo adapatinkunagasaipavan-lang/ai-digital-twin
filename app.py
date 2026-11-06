@@ -167,6 +167,7 @@ with avatar_col:
             text=p.get("text"), words=p.get("words"), wtimes=p.get("wtimes"),
             wdurations=p.get("wdurations"), lang=lang, poster=PHOTO,
             glb_urls=GLB_FALLBACK_URLS, body="M",
+            preset=profile.get("avatar_preset", "avatarsdk"),
         ), height=540)
     else:
         landmarks = profile.get("avatar_landmarks") or {}

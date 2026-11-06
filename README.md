@@ -105,3 +105,7 @@ pytest
    blinking, head and hand motion. Voice comes from edge-tts with word timings.
 
 Offline dev: set `TWIN_IMPORTS_JSON` to point the three.js / TalkingHead imports at local files.
+
+**Stock avatar credit:** `static/avatar.glb` is the free example male avatar from the TalkingHead repo
+(created at AvatarSDK, non-commercial use). The logo on the shirt was removed and the shirt recoloured.
+Swap in your own GLB any time (set `avatar_preset: avaturn` in `profile.yaml` for Avaturn T2 files).

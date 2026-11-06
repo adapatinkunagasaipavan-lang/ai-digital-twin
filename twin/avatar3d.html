@@ -102,6 +102,8 @@ async function boot() {
     lipsyncModules: ["en"],
     lipsyncLang: "en",
     cameraView: cfg.view || "upper",
+    cameraDistance: -0.5,
+    cameraY: 0.02,
     cameraRotateEnable: false,
     cameraZoomEnable: false,
     cameraPanEnable: false,
@@ -109,7 +111,8 @@ async function boot() {
     avatarSpeakingHeadMove: 0.6,
     avatarIdleEyeContact: 0.4,
     avatarIdleHeadMove: 0.5,
-    lightAmbientIntensity: 2.2,
+    lightAmbientIntensity: 1.1,
+    lightDirectIntensity: 18,
     modelFPS: 30,
   });
   window.__head = head;

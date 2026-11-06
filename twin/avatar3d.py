@@ -25,6 +25,18 @@ AVATURN_RETARGET = {
 }
 AVATURN_BASELINE = {"headRotateX": -0.05, "eyeBlinkLeft": 0.15, "eyeBlinkRight": 0.15}
 
+# Settings recommended by the TalkingHead author for the stock male (AvatarSDK) avatar.
+AVATARSDK_RETARGET = {
+    "Neck": {"z": -0.01, "rx": -0.15}, "Neck1": {"z": -0.01, "rx": -0.15}, "Neck2": {"z": -0.01, "rx": -0.15},
+    "LeftShoulder": {"rz": -0.3}, "RightShoulder": {"rz": 0.3},
+    "scaleToEyesLevel": 1.0, "origin": {"y": -0.1},
+}
+AVATARSDK_BASELINE = {"headRotateX": -0.04, "eyeBlinkLeft": 0.05, "eyeBlinkRight": 0.05}
+PRESETS = {
+    "avaturn": (AVATURN_RETARGET, AVATURN_BASELINE),
+    "avatarsdk": (AVATARSDK_RETARGET, AVATARSDK_BASELINE),
+}
+
 
 def build_html(
     audio_mp3: bytes | None = None,
@@ -38,8 +50,10 @@ def build_html(
     body: str = "M",
     imports: dict | None = None,
     force_play: bool = False,
+    preset: str = "avatarsdk",
 ) -> str:
     env_imports = json.loads(os.environ.get("TWIN_IMPORTS_JSON", "{}"))  # offline dev override
+    retarget, baseline = PRESETS.get(preset, PRESETS["avatarsdk"])
     imap = {**CDN, **env_imports, **(imports or {})}
     cfg = {
         "audio": base64.b64encode(audio_mp3).decode() if audio_mp3 else None,
@@ -52,8 +66,8 @@ def build_html(
                    if poster and Path(poster).exists() else None),
         "glbUrls": glb_urls or [],
         "body": body,
-        "retarget": AVATURN_RETARGET,
-        "baseline": AVATURN_BASELINE,
+        "retarget": retarget,
+        "baseline": baseline,
         "forcePlay": force_play,
         "view": "upper",
     }
