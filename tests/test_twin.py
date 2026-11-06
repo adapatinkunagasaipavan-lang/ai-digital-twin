@@ -120,3 +120,31 @@ def test_face_mesh_is_consistent():
         assert len(m[k]) == n
     assert max(m["idx"]) < n and len(m["idx"]) % 3 == 0
     assert all(0 <= w <= 1 for w in m["wJaw"])
+
+
+def test_avatar3d_html_embeds_config_and_imports():
+    from twin.avatar3d import build_html as b3
+    html = b3(audio_mp3=b"ID3abc", text="hello there", words=["hello", "there"],
+              wtimes=[0, 400], wdurations=[350, 400], lang="te", glb_urls=["https://x/y.glb"])
+    assert "talkinghead" in html and "three" in html
+    assert "__CONFIG__" not in html and "__THREE__" not in html
+    assert "SUQzYWJj" in html            # base64 of the audio
+    assert "https://x/y.glb" in html and "te-IN" in html
+
+
+def test_tts_timed_parses_word_boundaries(monkeypatch):
+    import edge_tts
+    from twin import voice
+
+    class FakeComm:
+        def __init__(self, *a, **k): pass
+        async def stream(self):
+            yield {"type": "audio", "data": b"abc"}
+            yield {"type": "WordBoundary", "offset": 5_000_000, "duration": 3_000_000, "text": "Hello"}
+            yield {"type": "WordBoundary", "offset": 9_000_000, "duration": 2_000_000, "text": "world"}
+            yield {"type": "audio", "data": b"def"}
+
+    monkeypatch.setattr(edge_tts, "Communicate", FakeComm)
+    audio, words, wt, wd = voice.tts_timed("Hello world", "en")
+    assert audio == b"abcdef" and words == ["Hello", "world"]
+    assert wt == [500.0, 900.0] and wd == [300.0, 200.0]

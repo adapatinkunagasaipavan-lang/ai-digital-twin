@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; height:100%; background:transparent; overflow:hidden; font-family: system-ui, sans-serif; }
+  #wrap { position:relative; width:100%; height:100%; border-radius:18px; overflow:hidden;
+          background: radial-gradient(120% 90% at 50% 20%, #3a3f55 0%, #1c1f2b 70%); }
+  #avatar { position:absolute; inset:0; }
+  #poster { position:absolute; inset:0; background-size:cover; background-position:center top;
+            filter: blur(6px) brightness(.55); transition: opacity .6s; }
+  #badge { position:absolute; top:12px; left:12px; z-index:3; padding:5px 11px; border-radius:999px;
+           background:rgba(0,0,0,.55); color:#fff; font-size:13px; display:flex; gap:7px; align-items:center; }
+  #dot { width:8px; height:8px; border-radius:50%; background:#9aa; }
+  #msg { position:absolute; left:0; right:0; bottom:18px; text-align:center; color:#fff; font-size:14px; z-index:3;
+         text-shadow:0 1px 4px rgba(0,0,0,.8); padding:0 14px; }
+  #play { position:absolute; left:50%; bottom:54px; transform:translateX(-50%); z-index:4; display:none;
+          padding:10px 20px; border:0; border-radius:999px; background:#ff4b4b; color:#fff; font-size:15px; cursor:pointer; }
+  #sub { position:absolute; left:12px; right:12px; bottom:12px; z-index:3; text-align:center; color:#fff;
+         font-size:15px; line-height:1.35; text-shadow:0 1px 5px #000; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "__THREE__",
+    "three/addons/": "__THREE_ADDONS__",
+    "talkinghead": "__TALKINGHEAD__"
+} }
+</script>
+</head>
+<body>
+<div id="wrap">
+  <div id="avatar"></div>
+  <div id="poster"></div>
+  <div id="badge"><span id="dot"></span><span id="state">Loading 3D avatar…</span></div>
+  <button id="play">▶ Play answer</button>
+  <div id="sub"></div>
+</div>
+
+<script>window.__CFG__ = __CONFIG__;</script>
+<script type="module">
+import { TalkingHead } from "talkinghead";
+
+const cfg = window.__CFG__;
+const $ = (id) => document.getElementById(id);
+const stateEl = $("state"), dot = $("dot"), playBtn = $("play"), sub = $("sub");
+const setState = (t, c) => { stateEl.textContent = t; dot.style.background = c || "#9aa"; };
+window.__avatarState = "loading";
+if (cfg.poster) $("poster").style.backgroundImage = `url(${cfg.poster})`;
+
+function b64ToBuf(b64) {
+  const bin = atob(b64), n = bin.length, u = new Uint8Array(n);
+  for (let i = 0; i < n; i++) u[i] = bin.charCodeAt(i);
+  return u.buffer;
+}
+
+// Word timings spread over the clip (fallback when the TTS gave none).
+function spreadWords(text, durMs) {
+  const words = (text || "").split(/\s+/).filter(Boolean);
+  const w = words.map(x => x.length + 2), tot = w.reduce((a, b) => a + b, 0) || 1;
+  const lead = 80, usable = Math.max(200, durMs - lead - 120);
+  let t = lead; const wtimes = [], wdurations = [];
+  w.forEach(v => { const d = usable * v / tot; wtimes.push(t); wdurations.push(d * 0.92); t += d; });
+  return { words, wtimes, wdurations };
+}
+
+// Language-agnostic visemes from the loudness envelope (used for Telugu).
+function envelopeVisemes(buf) {
+  const ch = buf.getChannelData(0), sr = buf.sampleRate, win = Math.floor(sr * 0.07);
+  const seq = ["aa", "O", "E", "aa", "U", "I"], visemes = [], vtimes = [], vdurations = [];
+  let peak = 1e-6, rms = [];
+  for (let i = 0; i + win < ch.length; i += win) {
+    let s = 0; for (let j = 0; j < win; j++) s += ch[i + j] * ch[i + j];
+    const r = Math.sqrt(s / win); rms.push(r); if (r > peak) peak = r;
+  }
+  let k = 0;
+  rms.forEach((r, i) => {
+    if (r > peak * 0.12) { visemes.push(r > peak * 0.55 ? "aa" : seq[k++ % seq.length]); vtimes.push(i * 70); vdurations.push(120); }
+  });
+  return { visemes, vtimes, vdurations };
+}
+
+async function fetchGlb() {
+  const urls = [];
+  try { urls.push(window.parent.location.origin + "/app/static/avatar.glb"); } catch (e) {}
+  (cfg.glbUrls || []).forEach(u => urls.push(u));
+  for (const u of urls) {
+    try {
+      const r = await fetch(u);
+      if (!r.ok) continue;
+      const type = r.headers.get("content-type") || "";
+      if (type.includes("text/html")) continue;
+      const blob = await r.blob();
+      if (blob.size > 100000) return URL.createObjectURL(blob);
+    } catch (e) {}
+  }
+  throw new Error("avatar.glb not found");
+}
+
+let head;
+async function boot() {
+  head = new TalkingHead($("avatar"), {
+    lipsyncModules: ["en"],
+    lipsyncLang: "en",
+    cameraView: cfg.view || "upper",
+    cameraRotateEnable: false,
+    cameraZoomEnable: false,
+    cameraPanEnable: false,
+    avatarSpeakingEyeContact: 0.7,
+    avatarSpeakingHeadMove: 0.6,
+    avatarIdleEyeContact: 0.4,
+    avatarIdleHeadMove: 0.5,
+    lightAmbientIntensity: 2.2,
+    modelFPS: 30,
+  });
+  window.__head = head;
+  const url = await fetchGlb();
+  await head.showAvatar({
+    url, body: cfg.body || "M", avatarMood: "neutral", lipsyncLang: "en",
+    retarget: cfg.retarget, baseline: cfg.baseline,
+  }, (ev) => {
+    if (ev.lengthComputable) setState("Loading 3D avatar " + Math.min(100, Math.round(ev.loaded / ev.total * 100)) + "%");
+  });
+  $("poster").style.opacity = 0;
+  setTimeout(() => $("poster").remove(), 700);
+  setState("Idle");
+  window.__avatarState = "idle";
+  await speakIfNeeded();
+}
+
+let pending = null;
+async function prepare() {
+  if (!cfg.audio) return null;
+  const buf = await head.audioCtx.decodeAudioData(b64ToBuf(cfg.audio));
+  const durMs = buf.duration * 1000;
+  const wt = (cfg.words && cfg.words.length) ? { words: cfg.words, wtimes: cfg.wtimes, wdurations: cfg.wdurations }
+                                              : spreadWords(cfg.text, durMs);
+  const msg = { audio: buf };
+  if (cfg.lang && cfg.lang.startsWith("te")) Object.assign(msg, wt, envelopeVisemes(buf));
+  else Object.assign(msg, wt);
+  return { msg, durMs };
+}
+
+async function play() {
+  try { await head.audioCtx.resume(); } catch (e) {}
+  playBtn.style.display = "none";
+  const p = pending; pending = null;
+  setState("Speaking", "#3ddc84"); window.__avatarState = "speaking";
+  head.speakAudio(p.msg, { lipsyncLang: "en" });
+  setTimeout(() => { setState("Idle"); window.__avatarState = "idle"; }, p.durMs + 600);
+}
+
+async function speakIfNeeded() {
+  if (!cfg.audio) return;
+  pending = await prepare();
+  try { await head.audioCtx.resume(); } catch (e) {}
+  if (head.audioCtx.state === "running" || cfg.forcePlay) { await play(); }
+  else { playBtn.style.display = "block"; setState("Click ▶ to hear me", "#f5a623"); }
+}
+playBtn.addEventListener("click", () => { if (pending) play(); });
+
+document.addEventListener("visibilitychange", () => {
+  if (!head) return;
+  document.visibilityState === "visible" ? head.start() : head.stop();
+});
+
+boot().catch((e) => {
+  console.error(e);
+  window.__avatarState = "error";
+  setState("3D avatar unavailable", "#ff6b6b");
+  $("sub").textContent = String(e && e.message || e);
+});
+</script>
+</body>
+</html>

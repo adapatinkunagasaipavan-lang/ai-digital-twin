@@ -94,3 +94,14 @@ pytest
 - Voice input uses a free Google endpoint and may be rate-limited; typing always works.
 - The D-ID mode is implemented against the public API docs but needs your key to try.
 - If your repo is public, your photo and profile are public too.
+
+## Real 3D avatar (recommended)
+
+1. Go to <https://avaturn.me>, upload a front-facing selfie, pick an outfit, and export the **GLB**
+   (Type 2 / with face blendshapes + visemes). Free for non-commercial use.
+2. Save it as `static/avatar.glb` in this repo, then `git add static/avatar.glb && git commit && git push`.
+3. In the app choose **Real 3D avatar (free, live)**. It uses three.js + the
+   [TalkingHead](https://github.com/met4citizen/TalkingHead) library for real-time lip-sync,
+   blinking, head and hand motion. Voice comes from edge-tts with word timings.
+
+Offline dev: set `TWIN_IMPORTS_JSON` to point the three.js / TalkingHead imports at local files.

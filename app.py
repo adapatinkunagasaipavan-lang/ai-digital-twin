@@ -13,11 +13,17 @@ import streamlit.components.v1 as components
 
 from twin import did_client, voice
 from twin.avatar import build_html
+from twin.avatar3d import build_html as build_html_3d
 from twin.brain import Brain, has_placeholders, load_profile
 
 ROOT = Path(__file__).parent
 PHOTO = ROOT / "assets" / "photo.jpg"
 PROFILE = ROOT / "profile.yaml"
+GLB = ROOT / "static" / "avatar.glb"   # rigged 3D avatar made at avaturn.me (see README)
+GLB_FALLBACK_URLS = [
+    os.environ.get("AVATAR_GLB_URL") or
+    "https://raw.githubusercontent.com/adapatinkunagasaipavan-lang/ai-digital-twin/main/static/avatar.glb",
+]
 
 st.set_page_config(page_title="AI Digital Twin", page_icon="🧑‍💻", layout="wide")
 
@@ -56,11 +62,14 @@ with st.sidebar:
     lang = "te" if lang_label.startswith("తెలుగు") else "en"
     voice_on = st.toggle("Voice replies", value=True)
 
+    MODES = ["Real 3D avatar (free, live)", "Animated photo (2.5D)", "Realistic video (D-ID)"]
     mode = st.radio(
-        "Avatar mode",
-        ["3D animated photo (free)", "Realistic video (D-ID)"],
-        help="The realistic mode needs a D-ID API key and uses credits.",
+        "Avatar mode", MODES, index=0 if GLB.exists() else 1,
+        help="Real 3D needs static/avatar.glb (made from your selfie at avaturn.me). "
+             "D-ID needs an API key and credits.",
     )
+    if mode == MODES[0] and not GLB.exists():
+        st.warning("static/avatar.glb not found yet. Create it at avaturn.me and add it to the repo.")
 
     with st.expander("🔑 API keys (optional)"):
         st.caption("Stored only in this browser session. For permanent keys use "
@@ -107,7 +116,12 @@ def answer(prompt: str) -> None:
             except Exception as exc:
                 st.toast(f"D-ID failed ({exc}). Using the 3D photo avatar.", icon="⚠️")
     if voice_on:
-        ss.play["audio"] = voice.tts_mp3(text, lang)
+        if mode.startswith("Real 3D"):
+            timed = voice.tts_timed(text, lang)
+            if timed:
+                ss.play.update(audio=timed[0], words=timed[1], wtimes=timed[2], wdurations=timed[3])
+        else:
+            ss.play["audio"] = voice.tts_mp3(text, lang)
 
 
 SUGGESTIONS = ["Tell me about yourself", "What projects have you built?",
@@ -146,6 +160,14 @@ with avatar_col:
     play, ss.play = ss.play, None  # speak once, then go idle on later reruns
     if ss.video_url:
         st.video(ss.video_url, autoplay=True)
+    elif mode.startswith("Real 3D") and GLB.exists():
+        p = play or {}
+        components.html(build_html_3d(
+            audio_mp3=p.get("audio") if voice_on else None,
+            text=p.get("text"), words=p.get("words"), wtimes=p.get("wtimes"),
+            wdurations=p.get("wdurations"), lang=lang, poster=PHOTO,
+            glb_urls=GLB_FALLBACK_URLS, body="M",
+        ), height=540)
     else:
         landmarks = profile.get("avatar_landmarks") or {}
         html = build_html(
